@@ -10,6 +10,9 @@ env/
 .env
 
 
+data/
+
+
 # Python
 __pycache__/
 *.pyc
