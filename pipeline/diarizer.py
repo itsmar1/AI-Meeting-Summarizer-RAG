@@ -90,8 +90,6 @@ def _build_turn_index(annotation: Annotation) -> list[tuple[float, float, str]]:
     return turns
 
 
-
-
 def _assign_speaker_to_word(
     word: WordTimestamp,
     turns: list[tuple[float, float, str]],
@@ -108,7 +106,6 @@ def _assign_speaker_to_word(
         word:  Word with start/end timestamps from Whisper.
         turns: Pre-sorted list of (start, end, speaker) from _build_turn_index().
 
-
     Returns:
         Speaker label string e.g. "SPEAKER_00", or "UNKNOWN" if no turn
         overlaps the word at all.
@@ -118,7 +115,7 @@ def _assign_speaker_to_word(
     # Fast path: find first turn containing the midpoint
     for start, end, speaker in turns:
         if start > mid:
-            break  # turns are sorted — no point continuing
+            break           # turns are sorted — no point continuing
         if start <= mid <= end:
             return speaker
 
@@ -127,7 +124,7 @@ def _assign_speaker_to_word(
     best_overlap = 0.0
     for start, end, speaker in turns:
         if start > word.end:
-            break  # past the word entirely
+            break           # past the word entirely
         overlap = min(end, word.end) - max(start, word.start)
         if overlap > best_overlap:
             best_overlap = overlap
@@ -183,38 +180,18 @@ def _merge_into_segments(diarized_words: list[DiarizedWord]) -> list[DiarizedSeg
     return segments
 
 
-def diarize(
-    audio_path: str | Path,
+def _diarize_with_pyannote(
+    audio_path: Path,
     transcription: TranscriptionResult,
 ) -> DiarizationResult:
     """
-    Run speaker diarization and align the result with Whisper's word
-    timestamps to produce a speaker-labelled transcript.
-
-    Strategy
-    ────────
-    1. Run pyannote on the audio to get speaker turn boundaries.
-    2. For each word from Whisper, find which speaker turn it falls in.
-    3. Merge consecutive same-speaker words into readable segments.
-
-    Args:
-        audio_path:     Path to the 16 kHz mono WAV (same file used for
-                        transcription).
-        transcription:  TranscriptionResult from transcriber.transcribe().
-
-    Returns:
-        DiarizationResult with speaker-labelled segments and a formatted
-        transcript string.
-
-    Raises:
-        DiarizationError: If pyannote fails or produces no output.
+    Full diarization using pyannote — accurate but slow on CPU.
+    Only called when settings.enable_diarization is True.
     """
-    audio_path = Path(audio_path)
-    logger.info("Starting diarization: %s", audio_path.name)
-
     try:
         pipeline = _load_pipeline()
-        annotation: Annotation = pipeline(str(audio_path))
+        logger.info("Running pyannote inference (this may take several minutes)…")
+        annotation = pipeline(str(audio_path))
     except DiarizationError:
         raise
     except Exception as exc:
@@ -223,7 +200,6 @@ def diarize(
     speakers = annotation.labels()
     logger.info("Diarization found %d speaker(s).", len(speakers))
 
-    # Flatten all words from all Whisper segments into one list
     all_words: list[WordTimestamp] = [
         word
         for segment in transcription.segments
@@ -236,9 +212,6 @@ def diarize(
             "Make sure word_timestamps=True is set in the transcriber."
         )
 
-    # Build the turn index ONCE — O(turns) — then reuse for every word.
-    # This replaces the old approach that called annotation.support().crop()
-    # once per word, which was O(words × turns) and caused multi-hour hangs.
     turn_index = _build_turn_index(annotation)
     logger.info(
         "Turn index built: %d speaker turns for %d words.",
@@ -246,7 +219,6 @@ def diarize(
         len(all_words),
     )
 
-    # Assign a speaker to every word using the fast index lookup
     diarized_words: list[DiarizedWord] = [
         DiarizedWord(
             word=w.word,
@@ -258,10 +230,7 @@ def diarize(
     ]
 
     segments = _merge_into_segments(diarized_words)
-
-    # Build the human-readable transcript string
     lines = [f"{seg.speaker}: {seg.text}" for seg in segments]
-    diarized_transcript = "\n".join(lines)
 
     logger.info(
         "Diarization complete: %d segments across %d speaker(s).",
@@ -272,5 +241,77 @@ def diarize(
     return DiarizationResult(
         segments=segments,
         speaker_count=len(speakers),
-        diarized_transcript=diarized_transcript,
+        diarized_transcript="\n".join(lines),
     )
+
+
+def _diarize_from_segments(transcription: TranscriptionResult) -> DiarizationResult:
+    """
+    Fast fallback: build a labelled transcript directly from Whisper's
+    segment boundaries without running pyannote at all.
+
+    Each Whisper segment becomes its own turn labelled SEGMENT_00, 01, …
+    This is not true speaker diarization but gives a readable, structured
+    transcript instantly — useful for testing and slow hardware.
+    """
+    logger.info(
+        "Diarization disabled — building transcript from %d Whisper segments.",
+        len(transcription.segments),
+    )
+
+    segments: list[DiarizedSegment] = []
+    for i, seg in enumerate(transcription.segments):
+        label = f"SEGMENT_{i:02d}"
+        segments.append(
+            DiarizedSegment(
+                speaker=label,
+                text=seg.text,
+                start=seg.start,
+                end=seg.end,
+            )
+        )
+
+    lines = [f"{seg.speaker}: {seg.text}" for seg in segments]
+
+    logger.info("Fallback transcript built: %d segments.", len(segments))
+
+    return DiarizationResult(
+        segments=segments,
+        speaker_count=0,          # 0 signals "diarization was skipped"
+        diarized_transcript="\n".join(lines),
+    )
+
+
+def diarize(
+    audio_path: str | Path,
+    transcription: TranscriptionResult,
+) -> DiarizationResult:
+    """
+    Run speaker diarization and align the result with Whisper's word
+    timestamps to produce a speaker-labelled transcript.
+
+    If settings.enable_diarization is False, skips pyannote entirely
+    and builds the transcript from Whisper's segment boundaries instead.
+    This is fast (< 1 second) and recommended on slow hardware.
+
+    Args:
+        audio_path:     Path to the 16 kHz mono WAV file.
+        transcription:  TranscriptionResult from transcriber.transcribe().
+
+    Returns:
+        DiarizationResult with labelled segments and a formatted transcript.
+
+    Raises:
+        DiarizationError: If pyannote fails (only when diarization is enabled).
+    """
+    audio_path = Path(audio_path)
+    logger.info("Starting diarization: %s", audio_path.name)
+
+    if not settings.enable_diarization:
+        logger.info(
+            "ENABLE_DIARIZATION=false — using fast segment fallback. "
+            "Set ENABLE_DIARIZATION=true to enable real speaker diarization."
+        )
+        return _diarize_from_segments(transcription)
+
+    return _diarize_with_pyannote(audio_path, transcription)

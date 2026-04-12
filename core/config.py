@@ -65,6 +65,16 @@ class Settings(BaseSettings):
         description="Hugging Face token required to download pyannote models.",
     )
 
+    # Diarization
+    enable_diarization: bool = Field(
+        default=True,
+        description=(
+            "Set to false to skip pyannote and use Whisper segments directly. "
+            "Recommended on slow hardware where pyannote is impractical."
+        ),
+    )
+
+
 
     # Storage
     db_path: Path = Field(
