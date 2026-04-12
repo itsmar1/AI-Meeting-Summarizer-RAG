@@ -43,6 +43,7 @@ def main() -> None:
         server_port=settings.app_port,
         debug=settings.debug,
         share=False,
+        theme="soft",
     )
 
 

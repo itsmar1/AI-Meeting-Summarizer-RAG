@@ -109,23 +109,23 @@ def build_history_tab() -> None:
     with gr.Tabs():
         with gr.Tab("Summary"):
             detail_summary = gr.Textbox(
-                interactive=False, lines=5, show_copy_button=True
+                interactive=False, lines=5
             )
         with gr.Tab("Decisions"):
             detail_decisions = gr.Textbox(
-                interactive=False, lines=5, show_copy_button=True
+                interactive=False, lines=5
             )
         with gr.Tab("Action items"):
             detail_actions = gr.Textbox(
-                interactive=False, lines=6, show_copy_button=True
+                interactive=False, lines=6
             )
         with gr.Tab("Open questions"):
             detail_questions = gr.Textbox(
-                interactive=False, lines=4, show_copy_button=True
+                interactive=False, lines=4
             )
         with gr.Tab("Full transcript"):
             detail_transcript = gr.Textbox(
-                interactive=False, lines=12, max_lines=30, show_copy_button=True
+                interactive=False, lines=12, max_lines=30
             )
 
     download_btn = gr.Button("Prepare transcript download", variant="secondary")

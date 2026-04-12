@@ -31,7 +31,7 @@ def _load_pipeline() -> Pipeline:
         logger.info("Loading pyannote speaker diarization pipeline…")
         _pipeline_cache = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=settings.hf_token,
+            token=settings.hf_token,
         )
         logger.info("Pyannote pipeline loaded.")
     return _pipeline_cache
@@ -66,41 +66,69 @@ class DiarizationResult:
     diarized_transcript: str    # formatted "SPEAKER_XX: text\n…" string
 
 
-def _assign_speaker_to_word(
-    word: WordTimestamp,
-    annotation: Annotation,
-) -> str:
+def _build_turn_index(annotation: Annotation) -> list[tuple[float, float, str]]:
     """
-    Find the speaker whose turn overlaps the most with a word's time span.
+    Pre-build a flat sorted list of (start, end, speaker) turns from the
+    pyannote annotation.
 
-    We use the midpoint of the word as the primary probe because very short
-    words can straddle a speaker boundary.  If no turn covers the midpoint
-    we fall back to a small window search.
+    Building this once and reusing it for every word lookup reduces the
+    complexity from O(words × turns) with expensive pyannote API calls
+    to O(turns) build + O(turns) per word worst case — fast enough for
+    any meeting-length audio.
 
     Args:
-        word:       Word with start/end timestamps from Whisper.
-        annotation: pyannote Annotation (diarization result).
+        annotation: pyannote Annotation from the diarization pipeline.
 
     Returns:
-        Speaker label string, e.g. "SPEAKER_00".  Returns "UNKNOWN" if no
-        match is found.
+        List of (start, end, speaker) tuples sorted by start time.
+    """
+    turns = [
+        (turn.start, turn.end, speaker)
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
+    ]
+    turns.sort(key=lambda t: t[0])
+    return turns
+
+
+
+
+def _assign_speaker_to_word(
+    word: WordTimestamp,
+    turns: list[tuple[float, float, str]],
+) -> str:
+    """
+    Find the speaker whose turn has the most overlap with a word's
+    time span, using a pre-sorted turn index.
+
+    Uses the word midpoint as the primary probe (fast path), then
+    falls back to maximum-overlap search for words that straddle
+    a speaker boundary.
+
+    Args:
+        word:  Word with start/end timestamps from Whisper.
+        turns: Pre-sorted list of (start, end, speaker) from _build_turn_index().
+
+
+    Returns:
+        Speaker label string e.g. "SPEAKER_00", or "UNKNOWN" if no turn
+        overlaps the word at all.
     """
     mid = (word.start + word.end) / 2
 
-    # Primary probe: which turn contains the word's midpoint?
-    turns = annotation.get_labels(
-        annotation.support().crop(
-            {"start": mid - 0.01, "end": mid + 0.01}
-        )
-    )
-    if turns:
-        return next(iter(turns))
+    # Fast path: find first turn containing the midpoint
+    for start, end, speaker in turns:
+        if start > mid:
+            break  # turns are sorted — no point continuing
+        if start <= mid <= end:
+            return speaker
 
-    # Fallback: largest overlap in the word's full span
+    # Fallback: maximum overlap for words at speaker boundaries
     best_speaker = "UNKNOWN"
     best_overlap = 0.0
-    for turn, _, speaker in annotation.itertracks(yield_label=True):
-        overlap = min(turn.end, word.end) - max(turn.start, word.start)
+    for start, end, speaker in turns:
+        if start > word.end:
+            break  # past the word entirely
+        overlap = min(end, word.end) - max(start, word.start)
         if overlap > best_overlap:
             best_overlap = overlap
             best_speaker = speaker
@@ -208,13 +236,23 @@ def diarize(
             "Make sure word_timestamps=True is set in the transcriber."
         )
 
-    # Assign a speaker to every word
+    # Build the turn index ONCE — O(turns) — then reuse for every word.
+    # This replaces the old approach that called annotation.support().crop()
+    # once per word, which was O(words × turns) and caused multi-hour hangs.
+    turn_index = _build_turn_index(annotation)
+    logger.info(
+        "Turn index built: %d speaker turns for %d words.",
+        len(turn_index),
+        len(all_words),
+    )
+
+    # Assign a speaker to every word using the fast index lookup
     diarized_words: list[DiarizedWord] = [
         DiarizedWord(
             word=w.word,
             start=w.start,
             end=w.end,
-            speaker=_assign_speaker_to_word(w, annotation),
+            speaker=_assign_speaker_to_word(w, turn_index),
         )
         for w in all_words
     ]

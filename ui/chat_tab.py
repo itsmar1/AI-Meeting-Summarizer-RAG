@@ -77,7 +77,6 @@ def build_chat_tab() -> None:
         interactive=False,
         lines=8,
         max_lines=20,
-        show_copy_button=True,
     )
 
     sources_display = gr.Textbox(

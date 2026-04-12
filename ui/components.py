@@ -42,7 +42,6 @@ def summary_box() -> gr.Textbox:
         label="Executive summary",
         interactive=False,
         lines=6,
-        show_copy_button=True,
     )
 
 
@@ -51,7 +50,6 @@ def decisions_box() -> gr.Textbox:
         label="Decisions",
         interactive=False,
         lines=5,
-        show_copy_button=True,
     )
 
 
@@ -60,7 +58,6 @@ def action_items_box() -> gr.Textbox:
         label="Action items",
         interactive=False,
         lines=6,
-        show_copy_button=True,
     )
 
 
@@ -69,7 +66,6 @@ def open_questions_box() -> gr.Textbox:
         label="Open questions",
         interactive=False,
         lines=4,
-        show_copy_button=True,
     )
 
 
@@ -79,7 +75,6 @@ def transcript_box() -> gr.Textbox:
         interactive=False,
         lines=12,
         max_lines=30,
-        show_copy_button=True,
     )
 
 
@@ -119,7 +114,6 @@ def chat_output() -> gr.Textbox:
         label="Answer",
         interactive=False,
         lines=6,
-        show_copy_button=True,
     )
 
 

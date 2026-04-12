@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from faster_whisper import WhisperModel
+import numpy as np
+from faster_whisper import WhisperModel, decode_audio
+
 
 from core.exceptions import LanguageDetectionError
 from core.logger import get_logger
@@ -37,9 +39,30 @@ class DetectionResult:
     confidence: float           # 0.0 – 1.0 probability from Whisper
 
 
-def detect_language(audio_path: str | Path, model: WhisperModel) -> DetectionResult:
+def load_audio(audio_path: str | Path) -> np.ndarray:
     """
-    Detect the spoken language in an audio file using faster-whisper's
+    Decode an audio file into a float32 numpy array at 16 kHz mono.
+
+    faster-whisper v1.x requires a pre-decoded array for both
+    detect_language() and transcribe() — passing a file path string
+    directly raises "'str' object has no attribute 'dtype'".
+
+    decode_audio() handles all formats ffmpeg supports and returns
+    a 1-D float32 array normalised to [-1, 1].
+
+    Args:
+        audio_path: Path to the pre-processed WAV file.
+
+    Returns:
+        1-D float32 numpy array at 16 kHz.
+    """
+    return decode_audio(str(audio_path))
+
+
+def detect_language(audio: np.ndarray, model: WhisperModel) -> DetectionResult:
+
+    """
+    Detect the spoken language in an audio array using faster-whisper's
     built-in language identification.
 
     faster-whisper analyses the first 30 seconds of audio and returns a
@@ -48,7 +71,7 @@ def detect_language(audio_path: str | Path, model: WhisperModel) -> DetectionRes
     threshold.
 
     Args:
-        audio_path: Path to the pre-processed WAV file.
+        audio:  Pre-decoded audio array from load_audio().
         model:      An already-loaded WhisperModel instance (shared with
                     the transcriber to avoid loading the model twice).
 
@@ -59,13 +82,29 @@ def detect_language(audio_path: str | Path, model: WhisperModel) -> DetectionRes
         LanguageDetectionError: If detection confidence is below the threshold
                                 or the detected language is unsupported.
     """
-    audio_path = Path(audio_path)
-    logger.info("Detecting language in: %s", audio_path.name)
+    logger.info("Detecting language…")
 
-    # detect_language() returns (language_code, probabilities_dict)
-    detected_code, probabilities = model.detect_language(str(audio_path))
+    # faster-whisper v1.2.1 returns a 3-element tuple:
+    #   ( best_language_code, best_probability, [(lang, prob), …] )
+    # e.g. ('en', 0.9037, [('en', 0.9037), ('cy', 0.036), …])
 
-    confidence = probabilities.get(detected_code, 0.0)
+    raw = model.detect_language(audio)
+
+    if (
+        isinstance(raw, (tuple, list))
+        and len(raw) >= 2
+        and isinstance(raw[0], str)
+        and isinstance(raw[1], float)
+    ):
+        detected_code: str = raw[0]
+        confidence: float = raw[1]
+
+    else:
+        raise LanguageDetectionError(
+            f"Unrecognised detect_language() return format: {repr(raw)[:200]}"
+        )
+
+
     logger.debug(
         "Language detection: code=%s confidence=%.2f", detected_code, confidence
     )

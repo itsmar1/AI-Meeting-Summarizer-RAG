@@ -1,12 +1,14 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 from faster_whisper import WhisperModel
 
 from core.config import settings
 from core.exceptions import TranscriptionError
 from core.logger import get_logger
-from pipeline.language_detector import DetectionResult, detect_language
+from pipeline.language_detector import DetectionResult, detect_language, load_audio
+
 
 logger = get_logger(__name__)
 
@@ -76,10 +78,12 @@ def transcribe(audio_path: str | Path) -> TranscriptionResult:
     """
     Transcribe an audio file to text with word-level timestamps.
 
-    Language is auto-detected from the first 30 seconds of audio and then
-    passed back to Whisper so the full transcription uses the correct
-    vocabulary.  The word timestamps are preserved so the diarizer can
-    later assign speaker labels to each word.
+    The audio file is decoded once into a numpy array via decode_audio()
+    and that array is reused for both language detection and transcription.
+    This avoids the "'str' object has no attribute 'dtype'" error that
+    occurs when passing a file path string to faster-whisper v1.x APIs
+    that expect a pre-decoded array.
+
 
     Args:
         audio_path: Path to the pre-processed 16 kHz mono WAV file.
@@ -97,15 +101,21 @@ def transcribe(audio_path: str | Path) -> TranscriptionResult:
     try:
         model = _load_model()
 
-        # Step 1 — detect language (reuses the loaded model, no extra cost)
-        language_result = detect_language(audio_path, model)
+        # Step 1 — decode audio to numpy array ONCE
+        # Both detect_language() and model.transcribe() receive the same
+        # array — no double file read, no path-string type mismatch.
+        audio: np.ndarray = load_audio(audio_path)
+        logger.debug("Audio decoded: %d samples at 16 kHz", len(audio))
 
-        # Step 2 — transcribe with word timestamps
+        # Step 2 — detect language from the decoded array
+        language_result = detect_language(audio, model)
+
+        # Step 3 — transcribe from the same decoded array
         raw_segments, _ = model.transcribe(
-            str(audio_path),
+            audio,  # ← numpy array, not a path string
             language=language_result.language_code,
-            word_timestamps=True,       # required for diarization alignment
-            vad_filter=True,            # skip silent parts → faster + cleaner
+            word_timestamps=True,  # required for diarization alignment
+            vad_filter=True,  # skip silent parts → faster + cleaner
             vad_parameters={
                 "min_silence_duration_ms": 500,
             },

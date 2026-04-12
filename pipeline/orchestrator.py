@@ -23,19 +23,45 @@ class PipelineProgress:
     detail: str = ""    # optional extra detail
 
 
+@dataclass
+class PipelineResult:
+    """
+    Single final object yielded at the end of run_pipeline.
+
+    Bundles everything the caller needs so no information produced
+    inside the pipeline is lost — the diarized transcript and speaker
+    count are both available here alongside the structured LLM output.
+
+    Attributes:
+        output:               Structured LLM output (summary, decisions,
+                              action items, open questions, language).
+        diarized_transcript:  Full speaker-labelled transcript string,
+                              e.g. "SPEAKER_00: …\nSPEAKER_01: …".
+        speaker_count:        Number of distinct speakers pyannote found.
+    """
+    output: MeetingOutput
+    diarized_transcript: str
+    speaker_count: int
+
+
+
+
 async def run_pipeline(
     audio_path: str | Path,
     context: str | None = None,
-) -> AsyncGenerator[PipelineProgress | MeetingOutput | str, None]:
+) -> AsyncGenerator[PipelineProgress | PipelineResult | str, None]:
     """
     Full end-to-end pipeline:
         Audio → Preprocess → Transcribe → Diarize
         → Extract structure → Stream summary
 
-    This is an async generator that yields:
-        - PipelineProgress objects at each stage (for the UI progress bar)
-        - Individual str tokens while the summary is streaming
-        - A final MeetingOutput object when everything is complete
+    This is an async generator that yields three types:
+        PipelineProgress  — one per pipeline stage, for live progress display.
+        str               — individual summary tokens while the LLM streams.
+        PipelineResult    — exactly one, at the very end, containing all
+                            output the caller needs (MeetingOutput +
+                            diarized transcript + speaker count).
+
 
     The caller (Gradio app) iterates over this generator and updates
     the UI incrementally.
@@ -45,7 +71,7 @@ async def run_pipeline(
         context:    Optional user-provided context string.
 
     Yields:
-        PipelineProgress | str | MeetingOutput
+        PipelineProgress | str | PipelineResult
 
     Raises:
         MeetingSummarizerError subclasses on failure (callers should catch
@@ -109,11 +135,18 @@ async def run_pipeline(
         summary_text = "".join(summary_tokens)
 
         # ── Final output ──────────────────────────────────────────────────────
-        yield MeetingOutput(
-            summary=summary_text,
-            extraction=extraction,
-            language_code=transcription.language.language_code,
-            language_name=transcription.language.language_name,
+        # PipelineResult carries everything — MeetingOutput plus the two fields
+        # (diarized_transcript, speaker_count) that were previously trapped
+        # inside the pipeline with no way out.
+        yield PipelineResult(
+            output=MeetingOutput(
+                summary=summary_text,
+                extraction=extraction,
+                language_code=transcription.language.language_code,
+                language_name=transcription.language.language_name,
+            ),
+            diarized_transcript=diarization.diarized_transcript,
+            speaker_count=diarization.speaker_count,
         )
 
     except MeetingSummarizerError:
@@ -131,24 +164,25 @@ async def run_pipeline(
 async def run_pipeline_collect(
     audio_path: str | Path,
     context: str | None = None,
-) -> tuple[MeetingOutput, DiarizationResult | None]:
+) -> PipelineResult:
     """
     Convenience wrapper that runs the full pipeline and collects all output,
-    returning the final MeetingOutput without streaming.
+    returning the final PipelineResult without streaming.
 
     Useful for CLI usage, tests, and batch processing.
 
     Returns:
-        Tuple of (MeetingOutput, DiarizationResult).
-        DiarizationResult may be None if diarization was skipped.
+        PipelineResult containing MeetingOutput, diarized transcript,
+        and speaker count.
+
     """
-    output: MeetingOutput | None = None
+    result: PipelineResult | None = None
 
     async for item in run_pipeline(audio_path, context):
-        if isinstance(item, MeetingOutput):
-            output = item
+        if isinstance(item, PipelineResult):
+            result = item
 
-    if output is None:
+    if result is None:
         raise MeetingSummarizerError("Pipeline completed without producing output.")
 
-    return output
+    return result

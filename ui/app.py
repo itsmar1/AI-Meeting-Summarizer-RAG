@@ -15,7 +15,7 @@ import gradio as gr
 
 from core.exceptions import MeetingSummarizerError
 from core.logger import get_logger
-from pipeline.orchestrator import PipelineProgress, run_pipeline
+from pipeline.orchestrator import PipelineProgress, PipelineResult, run_pipeline
 from pipeline.output_parser import MeetingOutput
 from rag.retriever import build_index
 from storage.session_repo import save_session, save_transcript_file
@@ -74,8 +74,6 @@ def run_summarise(audio_path: str | None, context: str):
         (progress, summary, decisions, action_items, open_questions,
          transcript, language, speakers, download_path, error_update)
     """
-    # Default / reset state
-    _empty = ("", "", "", "", "", "", "", "", None, gr.update(visible=False))
 
     if audio_path is None:
         yield (
@@ -86,19 +84,16 @@ def run_summarise(audio_path: str | None, context: str):
         return
 
     progress_log: list[str] = []
-    final_output: MeetingOutput | None = None
-    transcript_text: str = ""
-    speaker_count: int = 0
+    final_result: PipelineResult | None = None
 
     async def _run():
-        nonlocal final_output, transcript_text, speaker_count
+        nonlocal final_result
 
         async for item in run_pipeline(audio_path, context or None):
 
             if isinstance(item, PipelineProgress):
-                line = item.stage
-                if item.detail:
-                    line += f"  —  {item.detail}"
+                line = item.stage + (f"  —  {item.detail}" if item.detail else "")
+
                 progress_log.append(line)
                 yield (
                     "\n".join(progress_log),
@@ -107,13 +102,16 @@ def run_summarise(audio_path: str | None, context: str):
                 )
 
             elif isinstance(item, str):
-                # Streaming summary token — accumulate into final_output later
+                # Streaming summary token — accumulate inside PipelineResult
                 pass
 
-            elif isinstance(item, MeetingOutput):
-                final_output = item
 
-    # Run the async generator synchronously inside the Gradio thread
+            elif isinstance(item, PipelineResult):
+                # The single final object: has output, diarized_transcript,
+                # and speaker_count all in one place — no parsing required.
+                final_result = item
+
+    # Drive the async generator from Gradio's sync thread
     loop = asyncio.new_event_loop()
     try:
         ait = _run().__aiter__()
@@ -133,7 +131,7 @@ def run_summarise(audio_path: str | None, context: str):
     finally:
         loop.close()
 
-    if final_output is None:
+    if final_result is None:
         yield (
             "Pipeline completed but produced no output.",
             "", "", "", "", "", "", "", None,
@@ -141,60 +139,66 @@ def run_summarise(audio_path: str | None, context: str):
         )
         return
 
-    # ── Persist session ───────────────────────────────────────────────────────
-    # Extract speaker count from the last diarization progress message
-    for line in progress_log:
-        if "speaker" in line.lower():
-            for word in line.split():
-                if word.isdigit():
-                    speaker_count = int(word)
-                    break
+    output = final_result.output
+    diarized_transcript = final_result.diarized_transcript
+    speaker_count = final_result.speaker_count
 
-    # Get transcript from progress log (diarized_transcript is in the pipeline)
-    # We re-read it from the pipeline output's extraction context
-    transcript_text = ""
-    for line in progress_log:
-        pass  # transcript comes from the pipeline; we save it below
+    # ── Persist session to SQLite ─────────────────────────────────────────────
+    session_id: str | None = None
+    transcript_file_path = None
+    save_loop = asyncio.new_event_loop()
 
-    # Save to database
     try:
-        session_id = loop.run_until_complete(
+        session_id = save_loop.run_until_complete(
             save_session(
                 audio_filename=Path(audio_path).name,
-                transcript=final_output.summary,  # placeholder; see note below
-                output=final_output,
-                speaker_count=speaker_count,
+                transcript=diarized_transcript,  # ← real transcript now
+                output=output,
+                speaker_count=speaker_count,  # ← real speaker count now
                 context=context or None,
             )
-        ) if False else None  # will be wired properly in orchestrator v2
+        )
+        logger.info("Session saved: %s", session_id)
+
+        # Write transcript .txt file for the download button
+        transcript_file_path = save_loop.run_until_complete(
+            save_transcript_file(
+                session_id=session_id,
+                transcript=diarized_transcript,
+                audio_filename=Path(audio_path).name,
+            )
+        )
+
     except Exception as exc:
         logger.warning("Session save failed (non-fatal): %s", exc)
-        session_id = None
+    finally:
+        save_loop.close()
 
     # ── Build RAG index in the background ────────────────────────────────────
     if session_id:
-        async def _index():
-            try:
-                await build_index(session_id, final_output.summary)
-            except Exception as exc:
-                logger.warning("RAG index build failed (non-fatal): %s", exc)
-
-        bg_loop = asyncio.new_event_loop()
-        bg_loop.run_until_complete(_index())
-        bg_loop.close()
+        index_loop = asyncio.new_event_loop()
+        try:
+            index_loop.run_until_complete(
+                build_index(session_id, diarized_transcript)
+            )
+        except Exception as exc:
+            logger.warning("RAG index build failed (non-fatal): %s", exc)
+        finally:
+            index_loop.close()
 
     # ── Final UI update ───────────────────────────────────────────────────────
     progress_log.append("Done.")
     yield (
         "\n".join(progress_log),
-        final_output.summary,
-        _format_decisions(final_output),
-        _format_action_items(final_output),
-        _format_open_questions(final_output),
-        "",                             # transcript — see note
-        f"{final_output.language_name} ({final_output.language_code})",
-        str(speaker_count) if speaker_count else "—",
-        None,                           # download file
+        output.summary,
+        _format_decisions(output),
+        _format_action_items(output),
+        _format_open_questions(output),
+        diarized_transcript,  # ← real transcript now
+        f"{output.language_name} ({output.language_code})",
+        str(speaker_count),  # ← real speaker count now
+        str(transcript_file_path) if transcript_file_path else None,
+        # download file
         gr.update(visible=False),
     )
 
@@ -267,7 +271,6 @@ def create_app() -> gr.Blocks:
     """
     with gr.Blocks(
         title="Meeting Summariser",
-        theme=gr.themes.Soft(),
         analytics_enabled=False,
     ) as app:
 
