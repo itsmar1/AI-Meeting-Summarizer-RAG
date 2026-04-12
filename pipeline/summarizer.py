@@ -12,7 +12,9 @@ from pipeline.translation_prompt import build_extraction_prompt, build_summary_p
 logger = get_logger(__name__)
 
 _OLLAMA_GENERATE_URL = f"{settings.ollama_url}/api/generate"
-_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
+# _TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)
+_TIMEOUT = httpx.Timeout(connect=10.0, read=1800.0, write=30.0, pool=5.0)  # 30 min read timeout
+
 
 # llama3.2 has an 8k context window (8192 tokens ≈ ~6000 words ≈ ~32000 chars).
 # We reserve ~2000 tokens for the prompt template and the model's response,
