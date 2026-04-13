@@ -2,6 +2,10 @@
 
 An AI-powered meeting summariser with speaker diarization, structured output extraction, multi-language support, and retrieval-augmented Q&A over past transcripts.
 
+
+https://github.com/user-attachments/assets/5bb4e91f-6305-469d-ae79-a4ca59de05fb
+
+
 ## Features
 
 | Feature | Implementation |
