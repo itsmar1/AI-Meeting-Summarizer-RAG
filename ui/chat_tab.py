@@ -21,7 +21,7 @@ def _get_session_choices() -> list[tuple[str, str]]:
     Includes a special "All sessions" option as the first entry.
     """
     try:
-        sessions = asyncio.get_event_loop().run_until_complete(list_sessions(limit=30))
+        sessions = asyncio.run(list_sessions(limit=30))
         choices = [("All sessions (cross-meeting search)", "__all__")]
         for s in sessions:
             label = (
@@ -120,13 +120,13 @@ def build_chat_tab() -> None:
             from storage.session_repo import list_sessions as _list
 
             if session_value == "__all__":
-                sessions = asyncio.get_event_loop().run_until_complete(_list(limit=30))
+                sessions = asyncio.run(_list(limit=30))
                 sids = [s.id for s in sessions]
-                chunks = asyncio.get_event_loop().run_until_complete(
+                chunks = asyncio.run(
                     retrieve_across_sessions(sids, question)
                 )
             else:
-                chunks = asyncio.get_event_loop().run_until_complete(
+                chunks = asyncio.run(
                     retrieve(session_value, question)
                 )
 
@@ -159,33 +159,26 @@ def build_chat_tab() -> None:
         accumulated = ""
         try:
             if session_value == "__all__":
-                sessions = asyncio.get_event_loop().run_until_complete(
-                    list_sessions(limit=30)
-                )
+                sessions = asyncio.run(list_sessions(limit=30))
                 sids = [s.id for s in sessions]
                 gen = answer_across_sessions(question, sids)
             else:
                 gen = answer_question(question, session_value)
 
-            async def _collect():
-                nonlocal accumulated
+            async def _collect_all():
+                """Collect all tokens from the async generator into a single string."""
+                result = ""
                 async for token in gen:
-                    accumulated += token
-                    yield (
-                        gr.update(visible=False),
-                        sources_text,
-                        accumulated,
-                        gr.update(visible=False),
-                    )
+                    result += token
+                return result
 
-            loop = asyncio.get_event_loop()
-            ait = _collect().__aiter__()
-            while True:
-                try:
-                    result = loop.run_until_complete(ait.__anext__())
-                    yield result
-                except StopAsyncIteration:
-                    break
+            accumulated = asyncio.run(_collect_all())
+            yield (
+                gr.update(visible=False),
+                sources_text,
+                accumulated,
+                gr.update(visible=False),
+            )
 
         except MeetingSummarizerError as exc:
             yield (

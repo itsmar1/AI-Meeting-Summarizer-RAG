@@ -137,7 +137,7 @@ def build_history_tab() -> None:
 
     def on_refresh():
         try:
-            sessions = asyncio.get_event_loop().run_until_complete(list_sessions())
+            sessions = asyncio.run(list_sessions())
             return _format_session_list(sessions)
         except StorageError as exc:
             return f"Error loading sessions: {exc}"
@@ -148,7 +148,7 @@ def build_history_tab() -> None:
             empty = "Please enter a session ID."
             return empty, empty, empty, empty, empty, empty, gr.update(visible=False)
         try:
-            detail = asyncio.get_event_loop().run_until_complete(get_session(sid))
+            detail = asyncio.run(get_session(sid))
             summary, decisions, actions, questions, transcript, meta = (
                 _format_session_detail(detail)
             )
@@ -162,10 +162,10 @@ def build_history_tab() -> None:
         if not sid:
             return gr.update(value="Please enter a session ID.", visible=True), ""
         try:
-            deleted = asyncio.get_event_loop().run_until_complete(delete_session(sid))
+            deleted = asyncio.run(delete_session(sid))
             delete_collection(sid)
             if deleted:
-                sessions = asyncio.get_event_loop().run_until_complete(list_sessions())
+                sessions = asyncio.run(list_sessions())
                 return (
                     gr.update(value=f"Session {sid[:8]}… deleted.", visible=True),
                     _format_session_list(sessions),
@@ -179,10 +179,10 @@ def build_history_tab() -> None:
         if not sid:
             return None
         try:
-            detail = asyncio.get_event_loop().run_until_complete(get_session(sid))
+            detail = asyncio.run(get_session(sid))
             if detail is None:
                 return None
-            path = asyncio.get_event_loop().run_until_complete(
+            path = asyncio.run(
                 save_transcript_file(sid, detail.transcript, detail.audio_filename)
             )
             return str(path)
